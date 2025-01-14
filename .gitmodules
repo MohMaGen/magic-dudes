@@ -1,0 +1,9 @@
+[submodule "deps/nob"]
+	path = deps/nob
+	url = https://github.com/tsoding/nob.h.git
+[submodule "deps/raylib"]
+	path = deps/raylib
+	url = https://github.com/raysan5/raylib.git
+[submodule "raylib/lib"]
+	path = raylib/lib
+	url = https://github.com/raysan5/raylib.git
