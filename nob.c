@@ -11,7 +11,7 @@ const char HELP_MSG[] =
 "\n"
 "COMMANDS:\n"
 "        build      -- build targets.\n"
-"        run        -- build and run executable targets.\n"
+"        exec       -- build and run executable targets.\n"
 "        config     -- show current configuration.\n"
 "FLAGS:\n"
 "        --debug    -- build/run with debug compiler flags.\n"
@@ -305,7 +305,7 @@ main(int argc, char **argv)
 		return build_cmd(target, flags, &build_config);
 	}
 
-	cmd("run") {
+	cmd("exec") {
 		int ret;
 
 		if (argc < 3) {
