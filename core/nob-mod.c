@@ -27,7 +27,7 @@ module_init(Module *mod, Mem_Funcs temp, char *module_dir)
 
 		if (strendswith(path, ".h")) {
 			nob_da_append(&mod->files.c.incs, path);
-		}	
+		}
 	}
 	nob_da_free(srcs);
 
@@ -36,12 +36,13 @@ module_init(Module *mod, Mem_Funcs temp, char *module_dir)
 	Nob_File_Paths incs = { 0 };
 	nob_read_entire_dir(inc_dir, &incs);
 	for (size_t i = 0; i < incs.count; ++i) {
-		char *path = temp.sprintf("%s/%s", src_dir, srcs.items[i]);
+		char *path = temp.sprintf("%s/%s", inc_dir, incs.items[i]);
 
 		if (strendswith(path, ".h")) {
 			nob_da_append(&mod->files.c.incs, path);
 		}	
 	}
+
 
 	return true;
 }

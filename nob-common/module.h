@@ -20,8 +20,12 @@ typedef struct  {
         union {
                 struct { Nob_File_Paths srcs, incs; } c;
                 struct { Nob_File_Paths srcs; } c3;
-                struct { Nob_Cmd build_cmd; char *res; } custom; 
+                struct {
+			Nob_Cmd build_cmd;  Nob_File_Paths deps; char *res;
+		} custom; 
         } files;        
+
+	Strings glob_libs;
 
         char *c_inc_dir; // dir with c headers.
 
@@ -42,9 +46,9 @@ typedef struct  {
 
 
 typedef struct {
-	char * (*strdup)  (const char *);
-	char * (*sprintf) (const char *, ...);
-	void * (*alloc)   (size_t);
+	char * (*strdup)     (const char *);
+	char * (*sprintf)    (const char *, ...);
+	void * (*alloc)      (size_t);
 } Mem_Funcs;
 
 typedef void* (*module_temp_alloc_fn)      (size_t);
@@ -53,7 +57,7 @@ typedef bool  (*module_init_fn) (Module *, Mem_Funcs, const char *);
 
 
 char *
-module_name(const char *path)
+name_of_path(const char *path)
 {
         Nob_String_Builder sb = { 0 };
         
@@ -90,7 +94,7 @@ load_module(struct conf build_conf, const char *path, const char *dir,
         nob_log(NOB_INFO, "load nob module from `%s'", path);        
 
         char *bin = nob_temp_sprintf("%s/%s.so", modules_dir,
-                                                 module_name(path));
+                                                 name_of_path(path));
 
         int ret = nob_needs_rebuild1(bin, path);
         if (ret < 0) {
@@ -226,6 +230,9 @@ cmd_append_inc_dirs(Modules modules, Module *mod, Nob_Cmd *cmd)
         Module *dep;
         size_t idx;
 
+	if (mod->c_inc_dir != NULL)
+		nob_cmd_append(cmd, "-I", mod->c_inc_dir);
+
         for (size_t i = 0; i < mod->deps.count; ++i) {
                 if (!get_module_idx(modules, mod->deps.items[i], &idx)) {
                         nob_log(NOB_ERROR, "Failed!");
@@ -241,11 +248,13 @@ cmd_append_inc_dirs(Modules modules, Module *mod, Nob_Cmd *cmd)
                                            dep->name, mod->name);
                         return false;
                 }
-                nob_cmd_append(cmd, "-I", dep->c_inc_dir);
+		if (dep->c_inc_dir != NULL)
+			nob_cmd_append(cmd, "-I", dep->c_inc_dir);
         }
 
         return true;
 }
+
 
 bool
 build_c_module(struct conf build_conf, Modules modules, Module *mod,
@@ -262,13 +271,14 @@ build_c_module(struct conf build_conf, Modules modules, Module *mod,
         for (size_t i = 0; i < mod->files.c.srcs.count; ++i) {
                 deps = (Nob_File_Paths) { 0 };
 
-                char *obj = nob_temp_sprintf("%s/%s.o", mod->build_dir,
-                                             mod->files.c.srcs.items[i]);
-                nob_da_append(&mod->objs, obj);
+		char *name = name_of_path(mod->files.c.srcs.items[i]);
+                char *obj  = nob_temp_sprintf("%s/%s.o", mod->build_dir,
+                                                         name);
 
-                nob_da_append(&deps,  mod->files.c.srcs.items[i]);
-                nob_da_append_many(&deps, mod->files.c.incs.items,
-                                          mod->files.c.incs.count);
+		nob_da_append(&mod->objs, obj);
+		nob_da_append(&deps,      mod->files.c.srcs.items[i]);
+		nob_da_append_many(&deps, mod->files.c.incs.items,
+					  mod->files.c.incs.count);	
 
                 int ret = nob_needs_rebuild(obj, deps.items, deps.count);
                 if (ret < 0) { // failed.
@@ -286,10 +296,11 @@ build_c_module(struct conf build_conf, Modules modules, Module *mod,
                 }
 
                 if (ret == 0 && !build_conf.rebuild) { // no need to rebuild.
-                        nob_log(NOB_INFO, "No need to rebuild module `%s'",
-                                          mod->name);
-                        nob_return_defer(true);  
+			nob_log(NOB_INFO, "No need to rebuild `%s", obj);
+			continue;
                 }
+
+		*cmd = (Nob_Cmd) { 0 };
 
                 nob_cmd_append(cmd, build_conf.c_compiler, "-o", obj,
                                "-c", mod->files.c.srcs.items[i]);
@@ -301,6 +312,7 @@ build_c_module(struct conf build_conf, Modules modules, Module *mod,
                 nob_da_append_many(cmd, build_conf.c_debug_flags.items,
                                         build_conf.c_debug_flags.count);
 
+		cmd_append_inc_dirs(modules, mod, cmd);
 
                 nob_da_append(&procs, nob_cmd_run_async_and_reset(cmd));
 
@@ -331,19 +343,45 @@ build_module(struct conf build_conf, Modules modules, Module *mod,
         mod->build_dir = nob_temp_sprintf("%s/%s", build_conf.build_dir,
                                                   mod->name);
 
+	if (!nob_mkdir_if_not_exists(mod->build_dir)) {
+		nob_log(NOB_ERROR, "Failed to create mod dir!");
+		mod->state = mod_state_Failed;
+		return false;
+	}
+
         switch (mod->lang) {
         case mod_lang_C:
-                return build_c_module(build_conf, modules, mod, cmd);
+                if (build_c_module(build_conf, modules, mod, cmd)) {	
+			mod->state = mod_state_Builded;
+			return true;
+		} else {
+			return false;
+		}
         case mod_lang_C3:
                 nob_log(NOB_ERROR, "C3 language isnot implemented yet");
                 return false;
         case mod_lang_Custom:
+                int ret = nob_needs_rebuild(mod->files.custom.res,
+						 mod->files.custom.deps.items,
+						 mod->files.custom.deps.count);
+		if (ret < 0) {
+			nob_log(NOB_ERROR, "Failed to check deps of mod %s",
+					   mod->name);
+			return false;
+		}
+
+		if (ret == 0 && !build_conf.rebuild) {
+			mod->state = mod_state_Builded;
+			return true;
+		}
+
 		if (!nob_cmd_run_sync(mod->files.custom.build_cmd)) {
 			nob_log(NOB_ERROR, "Failed to run build cmd for mod %s",
 					   mod->name);
 			mod->state = mod_state_Failed;
 			return false; 
 		}
+		mod->state = mod_state_Builded;
                 return true;
         }
 }
@@ -405,17 +443,22 @@ add_deps_c_module(struct conf build_conf, Modules modules, Module *mod,
 
         size_t dep_idx;        
 
+	for (size_t i = 0; i < mod->glob_libs.count; ++i) {
+		char *lib = mod->glob_libs.items[i];
+		nob_cmd_append(cmd, nob_temp_sprintf("-l%s", lib));
+	}
+
         for (size_t i = 0; i < mod->deps.count; ++i) {
                 get_module_idx(modules, mod->deps.items[i], &dep_idx);
                 dep = modules.items + dep_idx;
 
                 if (dep->type == mod_type_Lib) {
-                        add_deps_c_module(build_conf, modules, dep, cmd);
-                        
+                        add_deps_c_module(build_conf, modules, dep, cmd);                        
                 }
 
-                nob_cmd_append(cmd, nob_temp_sprintf("-L%s", dep->build_dir));
+                nob_cmd_append(cmd, "-L", nob_temp_sprintf("%s", dep->build_dir));
                 nob_cmd_append(cmd, nob_temp_sprintf("-l:lib%s.a", dep->name));
+
         }
 }
 
@@ -429,6 +472,12 @@ link_c_module(struct conf build_conf, Modules modules, Module *mod,
 
                 nob_cmd_append(cmd, build_conf.c_compiler);
 
+		char *output;
+		output = nob_temp_sprintf("%s/%s", mod->build_dir, mod->name);
+                nob_cmd_append(cmd, "-o", output);
+
+                nob_da_append_many(cmd, mod->objs.items, mod->objs.count);
+
                 nob_da_append_many(cmd, build_conf.c_warnings_flags.items,
                                         build_conf.c_warnings_flags.count);
 
@@ -438,11 +487,9 @@ link_c_module(struct conf build_conf, Modules modules, Module *mod,
 
                 add_deps_c_module(build_conf, modules, mod, cmd);
 
-                nob_da_append_many(cmd, mod->objs.items, mod->objs.count);
 
-		char *output;
-		output = nob_temp_sprintf("%s/%s", mod->build_dir, mod->name);
-                nob_cmd_append(cmd, "-o", output);
+		cmd_append_inc_dirs(modules, mod, cmd);
+
 
         } break;
         case mod_type_Lib: {
@@ -457,12 +504,12 @@ link_c_module(struct conf build_conf, Modules modules, Module *mod,
         } break;
         }
 
-        if (!nob_cmd_run_sync_and_reset(cmd)) {
-                nob_log(NOB_ERROR, "Failed to link module `%s'!!!! D:",
-                                   mod->name);
+	if (!nob_cmd_run_sync_and_reset(cmd)) {
+		nob_log(NOB_ERROR, "Failed to link module `%s'!!!! D:",
+				   mod->name);
         }
 
-
+	mod->state = mod_state_Linked;
         return true;
 }
 
@@ -471,36 +518,56 @@ bool
 link_module(struct conf build_conf, Modules modules, size_t idx,
             Nob_Cmd *cmd, Modules_Box inherit_modules)
 {                
+	*cmd = (Nob_Cmd) { 0 };
+
 	Module *mod = modules.items + idx;
 
         if (get_module_idx(*(Modules*)&inherit_modules, mod->name, NULL)) {
                 nob_log(NOB_ERROR, "Looks like dependencies is looped!!!! D:");
-                return false;
+		goto return_error;
         }
 
         if (modules.count <= idx) {
                 nob_log(NOB_ERROR, "Module index out of range!!");
-                return false;
+		goto return_error;
         }
         box_push(&inherit_modules, *mod); // set this modules as inherited for
                                           // its dependecies.
 
         if (!link_deps(build_conf, modules, mod, cmd, inherit_modules)) {
                 // error logging already done :)
-                return false;
+		goto return_error;
         }
 
         switch (modules.items[idx].lang) {
         case mod_lang_C:
-                return link_c_module(build_conf, modules, mod, cmd);
+                if (link_c_module(build_conf, modules, mod, cmd))
+			goto return_success;
+		goto return_error;
+			
         case mod_lang_C3:
                 nob_log(NOB_ERROR, "C3 language isnot implemented yet");
-                return false;
-        case mod_lang_Custom:	
+		goto return_error;
+        case mod_lang_Custom:
 		nob_cmd_append(cmd, "cp", mod->files.custom.res,
 					  mod->build_dir);
-                return true;
+
+		if (!nob_cmd_run_sync_and_reset(cmd)) {
+			nob_log(NOB_ERROR, "Failed to linke module `%s",
+					   mod->name);
+			return false;
+		}
+		mod->state = mod_state_Linked;
+		goto return_success;
         }
+
+return_error:
+	mod->state = mod_state_Failed;
+	return false;
+
+return_success:
+	mod->state = mod_state_Linked;
+	return true;
 }
 
 bool

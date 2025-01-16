@@ -79,7 +79,7 @@ init_modules(struct conf build_config, Modules *modules)
 	if (!nob_mkdir_if_not_exists(build_config.build_dir)) {
 		nob_log(NOB_ERROR, "failed to creat build dir: %s",
 				   build_config.build_dir);
-		return -1;
+		return false;
 	}
 
 	// game modules
@@ -88,26 +88,20 @@ init_modules(struct conf build_config, Modules *modules)
 
 		nob_log(NOB_INFO, "load module `%s'", name);
 		if (!load_module_dir(build_config, name, &mod, &cmd)) {
-			return -1;
+			return false;
 		}
 
 		nob_da_append(modules, mod);
-
 	}
+
+
+	return true;
 }
 
-
-int
-build_cmd(char *target, Flags flags)
+bool
+build_modules(struct conf build_conf, Modules modules)
 {
-	int result = 0;
-
-        struct conf build_config = { 0 };
-	if (!get_config(&build_config, flags)) return -1;
-
-	Modules modules = { 0 };
-
-	init_modules(build_config, &modules);
+	bool result = true;
 
 	nob_log(NOB_INFO, "Build modules");
 
@@ -122,18 +116,153 @@ build_cmd(char *target, Flags flags)
 
 		nob_log(NOB_INFO, "Build module `%s'", mod->name);
 
-		if (!build_module(build_config, modules, mod, &cmd)) {
+		if (!build_module(build_conf, modules, mod, &cmd)) {
 			nob_log(NOB_ERROR, "Failed to build module `%s'",
 					   mod->name);
-			nob_return_defer(-1);
+			nob_return_defer(false);
+		}
+	}
+
+defer:
+	if (cmd.items != NULL)     nob_da_free(cmd);
+	return result;
+}
+
+bool
+link_modules(struct conf build_conf, Modules modules)
+{
+	bool result = true;
+
+	Nob_Cmd cmd = { 0 };
+	Module *mod = NULL;
+	Modules_Box inhmods = {
+		.items    = malloc(sizeof(Module) * modules.count),
+		.len      = 0,
+		.max_size = modules.count,
+	};
+
+	nob_log(NOB_INFO, "Linking modules");
+
+	for (size_t i = 0; i < modules.count; ++i) {
+		mod = modules.items + i;
+
+		if (mod->state != mod_state_Builded) continue;
+		nob_log(NOB_INFO, "Linking module `%s'", mod->name);
+
+		if (!link_module(build_conf, modules, i, &cmd, inhmods)) {
+			nob_log(NOB_ERROR, "Failed to link module `%s'",
+					   mod->name);
+			nob_return_defer(false);
+		}
+	}
+
+defer:
+	if (inhmods.items != NULL) free(inhmods.items);
+	if (cmd.items     != NULL) nob_da_free(cmd);
+
+	return result;
+}
+
+
+bool
+build_probes(char *target, struct conf build_conf, Modules *modules)
+{
+	bool result = true;
+	nob_log(NOB_INFO, "Build probes");
+
+	Nob_File_Paths probes = { 0 };
+
+	nob_read_entire_dir("probe", &probes);
+
+	Nob_Cmd cmd = { 0 };
+	Module *mod = NULL;
+
+	Modules_Box inhmods;
+
+	for (size_t i = 0; i < probes.count; ++i) {
+		if (strcmp(target, "all") != 0 &&
+		    strcmp(target, probes.items[i])) continue;
+
+		char *path = nob_temp_sprintf("probe/%s", probes.items[i]);
+		if (strendswith(path, "/.") || strendswith(path, "/..")) 
+			continue;
+
+		if (nob_get_file_type(path) != NOB_FILE_DIRECTORY)
+			continue;
+
+		nob_log(NOB_INFO, "Init probe module at `%s'", path);
+
+		Module md = { 0 };
+		if (!load_module_dir(build_conf, path, &md, &cmd)) {
+			nob_log(NOB_ERROR, "Failed to init probe module.");
+			nob_return_defer(false);
+		}
+		nob_da_append(modules, md);
+		size_t idx = modules->count - 1;
+		mod = modules->items + modules->count - 1;
+
+		nob_log(NOB_INFO, "Build probe module `%s'", mod->name);
+
+		if (!build_module(build_conf, *modules, mod, &cmd)) {
+			nob_log(NOB_ERROR, "Failed to build module `%s'",
+					   mod->name);
+			nob_return_defer(false);
 		}
 
+		nob_log(NOB_INFO, "Link probe module `%s'", mod->name);
+		inhmods = (Modules_Box) {
+			.items    = malloc(sizeof(Module) * modules->count),
+			.len      = 0,
+			.max_size = modules->count,
+		};
+
+		if (!link_module(build_conf, *modules, idx, &cmd, inhmods)) {
+			nob_log(NOB_ERROR, "Failed to link module `%s'",
+					   mod->name);
+			free(inhmods.items);
+			nob_return_defer(false);
+		}
+		free(inhmods.items);
+			
 	}
 defer:
-	if (modules.items != NULL) nob_da_free(modules);
 	if (cmd.items != NULL)     nob_da_free(cmd);
+	return result;
+}
 
-	return 0;	
+int
+build_cmd(char *target, Flags flags, struct conf *build_config)
+{
+	int result = 0;
+
+	if (!get_config(build_config, flags)) return -1;
+
+	Modules modules = { 0 };
+
+	if (!init_modules(*build_config, &modules)) {
+		nob_log(NOB_ERROR, "Failed to init modules!");
+		nob_return_defer(-1);
+	}
+
+	if (!build_modules(*build_config, modules)) {
+		nob_log(NOB_ERROR, "Failed to build modules!");
+		nob_return_defer(-1);
+	}
+
+	if (!link_modules(*build_config, modules)) {
+		nob_log(NOB_ERROR, "Failed to build modules!");
+		nob_return_defer(-1);
+	}
+
+	if (!build_probes(target, *build_config, &modules)) {
+		nob_log(NOB_ERROR, "Failed to build modules!");
+		nob_return_defer(-1);
+	}
+
+defer:
+	if (modules.items != NULL) nob_da_free(modules);
+
+	return 0;
 }
 
 #define cmd(name) if (strcmp(command, name) == 0)
@@ -169,10 +298,38 @@ main(int argc, char **argv)
 	}
 
 	cmd("build") {
-		char *target = NULL;
+		char *target = "all";
 		if (argc >= 3) target = argv[2];
+
+		struct conf build_config = { 0 };
+		return build_cmd(target, flags, &build_config);
+	}
+
+	cmd("run") {
+		int ret;
+
+		if (argc < 3) {
+			nob_log(NOB_ERROR, "Expect target to run!");
+			return -1;
+		}
+
 		
-		return build_cmd(target, flags);
+		char *target = argv[2];
+		
+		struct conf build_config = { 0 };
+		ret = build_cmd(target, flags, &build_config);
+
+		if (ret != 0) return ret;
+
+		Nob_Cmd cmd = { 0 };
+		nob_cmd_append(&cmd, nob_temp_sprintf("%s/%s/%s",
+							build_config.build_dir,
+							target, target));
+
+		if (!nob_cmd_run_sync_and_reset(&cmd)) {
+			nob_log(NOB_ERROR, "Failed to run `%s'", target);
+			return -1;
+		}
 	}
 
 
