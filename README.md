@@ -1,3 +1,7 @@
+> [!WARNING]
+> migrated to [codeberg](https://codeberg.org/mohmagen/magic-dudes.git)
+
+
 # MAGIC DUDES
 
 Game about magic dudes, where you can create your own magic spells and
